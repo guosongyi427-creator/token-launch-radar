@@ -1,4 +1,4 @@
-// token-radar-01 entry, model radar-3 (Node 22, standard library only).
+// token-radar-01 entry, model radar-4 (Node 22, standard library only).
 //
 // Reads the sealed snapshot, fits the size curve and launch odds on that
 // snapshot with lib/model.ts, writes board.json and data.js, copies
@@ -96,10 +96,12 @@ writeFileSync(
 );
 
 const f = radar.fit;
+const o = radar.odds;
 const v = radar.verdict_counts;
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live shown, ${radar.live_total} live in census, ${radar.excluded_size} excluded)\n` +
     `token radar: fit log(mcap) = ${f.intercept} + ${f.slope} * log(TVL), R2 ${f.r_squared}, n=${f.n}; LOO median abs log err ${f.loo_median_abs_log_err} vs flat ${f.flat_median_abs_log_err} (${f.loo_factor_vs_flat}x); walk-forward ${f.walk_forward_median_abs_log_err} vs flat ${f.walk_forward_flat_median_abs_log_err} (${f.walk_forward_factor}x)\n` +
+    `token radar: odds logistic 5-fold CV log-loss ${o.logistic_cv_logloss} AUC ${o.logistic_cv_auc} vs buckets ${o.bucket_cv_logloss} / ${o.bucket_cv_auc}; age weight ${o.logistic_age_weight}, TVL weight ${o.logistic_tvl_weight}\n` +
     `token radar: verdicts FARM ${v.FARM} / THIN ${v.THIN} / SKIP ${v.SKIP}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dash.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
