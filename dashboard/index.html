@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar — radar-3</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <p class="eyebrow">Pre-token protocols, ranked by what a launch would be worth</p>
+    <h1>Token Launch Radar</h1>
+    <p class="sub">Model <strong>radar-3</strong> · Snapshot <span id="asof">2026-11-14</span> · The size curve and the launch odds are fitted on this snapshot's live-token protocols — read the model panel, not a claim. Every protocol below <strong>records no token</strong>; that is what the snapshot says, not proof it has none.</p>
+    <div class="kpis" id="kpis"></div>
+  </div>
+</header>
+<main class="wrap">
+  <section class="controls">
+    <div class="tabs" role="tablist">
+      <button id="tab-pre" class="tab active" type="button">Pre-token board</button>
+      <button id="tab-live" class="tab" type="button">Live token</button>
+      <button id="tab-census" class="tab" type="button">Census · all 758</button>
+    </div>
+    <label class="field">Search <input id="q" type="search" placeholder="name, slug, category or chain" autocomplete="off"></label>
+    <label class="field">Category
+      <select id="category"><option value="">All categories</option></select>
+    </label>
+    <p class="hint">Click a column heading to sort. Click any row for its detail view, farm verdict and farm plan. Deep links: #p=&lt;slug&gt; opens a protocol, #category=&lt;name&gt; and #q=&lt;text&gt; filter the board.</p>
+  </section>
+
+  <section id="board-wrap">
+    <table id="board">
+      <thead><tr>
+        <th data-sort="rank">Rank</th>
+        <th data-sort="name">Protocol</th>
+        <th data-sort="tvl">TVL</th>
+        <th data-sort="growth">7d</th>
+        <th data-sort="age">Age</th>
+        <th data-sort="odds">Launch odds</th>
+        <th data-sort="implied">Implied value</th>
+        <th data-sort="verdict">Farm verdict</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="count" id="count"></p>
+  </section>
+
+  <section id="live-wrap" hidden>
+    <p class="live-note">These protocols already trade: the board shows the market's own market cap for them, never a modelled implied value, and never ranks them as pre-token. The top 24 by market cap are shown here; the census counts all 416 protocols that record a token.</p>
+    <table id="live">
+      <thead><tr><th>Protocol</th><th>TVL</th><th>Market cap</th><th>7d</th></tr></thead>
+      <tbody id="live-rows"></tbody>
+    </table>
+  </section>
+
+  <section id="census-wrap" hidden>
+    <p class="live-note" id="census-summary"></p>
+    <table id="census">
+      <thead><tr><th>Protocol</th><th>Why it is not on the ranked board</th></tr></thead>
+      <tbody id="census-rows"></tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="model-panel">
+    <h2>How the value is worked out — and tested</h2>
+    <p class="formula">launch value = exp(intercept + slope × ln(TVL) + category log-adjustment) × growth multiplier<br>implied value = launch value × launch odds</p>
+    <div id="fit-text"></div>
+    <h3>Out-of-sample test — the fitted curve against a flat multiple</h3>
+    <table class="mini" id="oos-table"></table>
+    <p class="meta">Median absolute log error: a value of 1.2 means the typical prediction is off by a factor of about e<sup>1.2</sup> ≈ 3.3. The fit is weak in absolute terms (R² ≈ 0.19) — the test is shown so you can see exactly how weak, and that it still beats a flat multiple out of sample.</p>
+    <h3>Launch odds fall with no-token age</h3>
+    <table class="mini" id="odds-table"></table>
+    <p class="meta">Odds = the share of protocols in the same age bucket that still record no token, smoothed toward the overall pre-token share with 20 pseudo-counts, then forced non-increasing with age. That share is then multiplied by a TVL factor and a growth factor (each bucket's pre-token share over the overall share, clamped to 0.85–1.15) and clamped to 0.05–0.95. Unknown age uses the overall share. Growth is already in the launch value; its bucket shares are too noisy (n = 6 in the top bucket) to carry more weight in the odds.</p>
+    <h3>Category log-adjustments (fitted, shrunk toward 0)</h3>
+    <ul class="mults" id="cat-adj"></ul>
+    <h3>Farm verdicts — netted to the dollar</h3>
+    <p>Expected farm value = implied value × 10% farmer share ÷ farmers. Farmers are a stated proxy, not a measured headcount: 500 for rank 1, +10 per rank. Cost = capital (by TVL) + gas + time at $25/hour. Verdict: <strong>SKIP</strong> if net ≤ $0, <strong>THIN</strong> if $0 &lt; net ≤ $250, <strong>FARM</strong> otherwise. Time is charged at $25/hour inside the net, so net &gt; $0 already implies value/hour &gt; $25; THIN is the thin-margin band, where a small rise in farmers flips the verdict to SKIP.</p>
+    <p class="note">Implied value is this model's estimate from TVL, growth, age and the live-token record. It is not a price, not a prediction that a token will be issued, and not advice.</p>
+    <p class="meta" id="coverage"></p>
+  </section>
+</main>
+<dialog id="detail">
+  <div id="detail-body"></div>
+  <form method="dialog"><button class="close" type="submit">Close</button></form>
+</dialog>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
