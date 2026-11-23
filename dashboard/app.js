@@ -1,9 +1,10 @@
-// Token Launch Radar dashboard — radar-3. Static only: reads window.RADAR
+// Token Launch Radar dashboard — radar-4. Static only: reads window.RADAR
 // from data.js, no fetch, no network. Recomputes every row in the page
 // from the fitted curve and the fitted odds, so the page must agree with
 // board.json exactly. The recompute below mirrors lib/model.ts step for
-// step: log-log fit, category log-adjustment, growth multiplier, age
-// odds (non-increasing), TVL and growth factors, then the farm verdict.
+// step: log-log fit, category log-adjustment (20 pseudo-counts), growth
+// multiplier, then the ridge logistic launch odds from log TVL and
+// log(1 + age), then the farm verdict.
 (function () {
   var D = window.RADAR;
   if (!D) { document.getElementById('rows').innerHTML = '<tr><td colspan="8">No data loaded.</td></tr>'; return; }
@@ -21,9 +22,15 @@
   var r2 = function (n) { return Math.round(n * 100) / 100; };
   var clamp = function (v, lo, hi) { return Math.min(hi, Math.max(lo, v)); };
 
+  function sigmoid(z) { if (z > 35) return 1; if (z < -35) return 0; return 1 / (1 + Math.exp(-z)); }
+  function logisticOdds(row) {
+    var lt = Math.log(row.tvl_usd);
+    var age = row.age_days === null || row.age_days === undefined ? 1000 : row.age_days;
+    var z0 = (lt - O.logistic_mean[0]) / O.logistic_sd[0];
+    var z1 = (Math.log(1 + age) - O.logistic_mean[1]) / O.logistic_sd[1];
+    return sigmoid(O.logistic_intercept + O.logistic_weights[0] * z0 + O.logistic_weights[1] * z1);
+  }
   function ageBucket(age) { if (age === null || age === undefined) return -1; if (age < 180) return 0; if (age < 365) return 1; if (age < 730) return 2; return 3; }
-  function tvlBucket(tvl) { if (tvl < 5e7) return 0; if (tvl < 2e8) return 1; if (tvl < 1e9) return 2; return 3; }
-  function growthBucket(g) { if (g === null || g === undefined) return -1; if (g < -10) return 0; if (g < 0) return 1; if (g < 10) return 2; if (g < 50) return 3; return 4; }
   function capitalFor(tvl) { if (tvl >= 5e9) return 250; if (tvl >= 1e9) return 150; if (tvl >= 1e8) return 100; return 50; }
   function holdFor(age) { if (age === null || age === undefined) return 30; if (age < 180) return 60; if (age < 365) return 45; return 30; }
 
@@ -34,18 +41,12 @@
     g = clamp(g, M.growth_floor, M.growth_cap);
     var growthMult = 1 + (g / 100) * M.growth_weight;
     var launch = Math.exp(F.intercept + F.slope * Math.log(row.tvl_usd) + catAdj) * growthMult;
+    var lp = logisticOdds(row);
     var ab = ageBucket(row.age_days);
-    var ageOdds = ab < 0 ? O.overall_pre_token_share : O.age_odds[ab];
-    // Mirror lib/model.ts oddsFor exactly: the TVL and growth factors are
-    // NOT rounded before multiplying; only the final odds are rounded to
-    // 4 decimals after clamping. (Rounding the factors first shifts the
-    // implied value by a few dollars on some rows.)
-    var tvlF = clamp(O.tvl_buckets[tvlBucket(row.tvl_usd)].pre_token_share / O.overall_pre_token_share, M.factor_floor, M.factor_cap);
-    var gb = growthBucket(row.change_7d);
-    var growthF = gb < 0 ? 1 : clamp(O.growth_buckets[gb].pre_token_share / O.overall_pre_token_share, M.factor_floor, M.factor_cap);
-    var odds = Math.round(clamp(ageOdds * tvlF * growthF, M.odds_floor, M.odds_cap) * 1e4) / 1e4;
+    var ageMedian = ab < 0 ? O.overall_pre_token_share : O.age_bucket_logistic_median[ab];
+    var odds = Math.round(clamp(lp, M.odds_floor, M.odds_cap) * 1e4) / 1e4;
     var implied = Math.max(1, Math.round(launch * odds));
-    return { catAdj: catAdj, growthPct: g, growthMult: growthMult, launch: launch, ageOdds: ageOdds, tvlF: tvlF, growthF: growthF, odds: odds, implied: implied };
+    return { catAdj: catAdj, growthPct: g, growthMult: growthMult, launch: launch, logisticOdds: lp, ageMedian: ageMedian, odds: odds, implied: implied };
   }
 
   function farmFor(row, implied) {
@@ -81,21 +82,25 @@
     '<p><strong>Fitted size curve.</strong> log(market cap) = <strong>' + F.intercept + ' + ' + F.slope + ' × log(TVL)</strong>, fitted by least squares on ' + F.n +
     ' live-token protocols with a usable market cap (mcap &gt; 0; the snapshot also carries −1 and 0 sentinels, left out). R² = ' + F.r_squared +
     '. A flat median mcap/TVL multiple of ' + F.flat_median_ratio + ' is the baseline the fit is tested against.</p>' +
-    '<p><strong>Category adjustment.</strong> Each category’s median residual from that curve, shrunk toward 0 with 5 pseudo-counts and clamped to ±1 in log units — e.g. Lending ' +
+    '<p><strong>Category adjustment.</strong> Each category’s median residual from that curve, shrunk toward 0 with 20 pseudo-counts and clamped to ±1 in log units — e.g. Lending ' +
     (D.category_log_adj.Lending !== undefined ? D.category_log_adj.Lending.toFixed(3) : 'n/a') + ', Dexs ' +
     (D.category_log_adj.Dexs !== undefined ? D.category_log_adj.Dexs.toFixed(3) : 'n/a') + ', RWA ' +
-    (D.category_log_adj.RWA !== undefined ? D.category_log_adj.RWA.toFixed(3) : 'n/a') + '. Full list below.</p>';
+    (D.category_log_adj.RWA !== undefined ? D.category_log_adj.RWA.toFixed(3) : 'n/a') + '. The tests below refit the whole pipeline — curve, category adjustment and growth — inside every fold, so they are the numbers this board delivers, not the bare curve’s. Full list below.</p>' +
+    '<p><strong>Launch odds.</strong> A ridge logistic regression on all ' + D.census_total + ' protocols: P(still pre-token) from log TVL and log(1 + age). Standardised weights: TVL ' + O.logistic_tvl_weight + ', age ' + O.logistic_age_weight + ' — the age weight is negative, so the odds fall with no-token age, smoothly instead of in steps. 5-fold cross-validation: log-loss ' + O.logistic_cv_logloss + ', AUC ' + O.logistic_cv_auc + ', against the old age-bucket method’s ' + O.bucket_cv_logloss + ' / ' + O.bucket_cv_auc + ' on the same folds.</p>';
   document.getElementById('oos-table').innerHTML =
-    '<thead><tr><th>Test</th><th>Fitted curve</th><th>Flat multiple</th><th>Factor</th></tr></thead><tbody>' +
+    '<thead><tr><th>Test</th><th>Full pipeline</th><th>Flat multiple</th><th>Factor</th></tr></thead><tbody>' +
     '<tr><td>Leave-one-out (n=' + F.n + ')</td><td>' + F.loo_median_abs_log_err + '</td><td>' + F.flat_median_abs_log_err + '</td><td>' + F.loo_factor_vs_flat + '×</td></tr>' +
     '<tr><td>5-fold, by slug hash</td><td>' + F.five_fold_median_abs_log_err + '</td><td>' + F.flat_median_abs_log_err + '</td><td>' + (F.five_fold_median_abs_log_err > 0 ? (F.flat_median_abs_log_err / F.five_fold_median_abs_log_err).toFixed(2) : '—') + '×</td></tr>' +
     '<tr><td>Walk-forward (train ' + F.walk_forward_train_n + ' before 2024-06-01, test ' + F.walk_forward_test_n + ' after)</td><td>' + F.walk_forward_median_abs_log_err + '</td><td>' + F.walk_forward_flat_median_abs_log_err + '</td><td>' + F.walk_forward_factor + '×</td></tr>' +
+    '<tr><td>Bare log-log curve, leave-one-out (no category, no growth)</td><td>' + F.bare_loo_median_abs_log_err + '</td><td>' + F.flat_median_abs_log_err + '</td><td>' + (F.bare_loo_median_abs_log_err > 0 ? (F.flat_median_abs_log_err / F.bare_loo_median_abs_log_err).toFixed(2) : '—') + '×</td></tr>' +
     '</tbody>';
   document.getElementById('odds-table').innerHTML =
-    '<thead><tr><th>No-token age</th><th>Protocols</th><th>Still pre-token</th><th>Smoothed</th><th>Launch odds used</th></tr></thead><tbody>' +
+    '<thead><tr><th>No-token age</th><th>Protocols</th><th>Still pre-token</th><th>Smoothed</th><th>Median logistic odds</th></tr></thead><tbody>' +
     O.age_buckets.map(function (b, i) {
-      return '<tr><td>' + esc(b.label) + '</td><td>' + b.n + '</td><td>' + (b.pre_token_share * 100).toFixed(1) + '%</td><td>' + (b.smoothed_odds * 100).toFixed(1) + '%</td><td><strong>' + (O.age_odds[i] * 100).toFixed(1) + '%</strong></td></tr>';
+      return '<tr><td>' + esc(b.label) + '</td><td>' + b.n + '</td><td>' + (b.pre_token_share * 100).toFixed(1) + '%</td><td>' + (b.smoothed_odds * 100).toFixed(1) + '%</td><td><strong>' + (O.age_bucket_logistic_median[i] * 100).toFixed(1) + '%</strong></td></tr>';
     }).join('') + '</tbody>';
+  document.getElementById('odds-cv').textContent =
+    'Odds cross-validation (5-fold, by slug hash, same folds for both): logistic log-loss ' + O.logistic_cv_logloss + ' and AUC ' + O.logistic_cv_auc + '; age-bucket method ' + O.bucket_cv_logloss + ' and ' + O.bucket_cv_auc + '. Same calibration, better ranking. The bucket shares above are descriptive — the odds actually used are the smooth logistic ones.';
   document.getElementById('cat-adj').innerHTML = Object.keys(D.category_log_adj).sort().map(function (c) {
     var adj = D.category_log_adj[c];
     return '<li>' + esc(c) + ' (n=' + (D.category_n[c] || 0) + '): <strong>' + adj.toFixed(3) + '</strong> → ×' + Math.exp(adj).toFixed(3) + '</li>';
@@ -188,7 +193,7 @@
       '<dt>Age with no token</dt><dd>' + fmtAge(row.age_days) + (row.listed_at ? ' · first tracked ' + esc(row.listed_at) : '') + '</dd>' +
       '<dt>Fitted curve</dt><dd>exp(' + F.intercept + ' + ' + F.slope + ' × ln(TVL) + ' + c.catAdj.toFixed(3) + ') = ' + fmtMoney(c.launch / c.growthMult) + ' before growth; × ' + c.growthMult.toFixed(3) + ' growth = ' + fmtMoney(c.launch) + ' launch value</dd>' +
       '<dt>Category adjustment</dt><dd>' + c.catAdj.toFixed(3) + ' in log units (×' + Math.exp(c.catAdj).toFixed(3) + ')</dd>' +
-      '<dt>Launch odds</dt><dd>' + (c.odds * 100).toFixed(1) + '% — age ' + (c.ageOdds * 100).toFixed(1) + '% × TVL ' + c.tvlF.toFixed(2) + ' × growth ' + c.growthF.toFixed(2) + '</dd>' +
+      '<dt>Launch odds</dt><dd>' + (c.odds * 100).toFixed(1) + '% — ridge logistic on log TVL and log(1 + age), standardised weights TVL ' + O.logistic_tvl_weight + ' / age ' + O.logistic_age_weight + '; median logistic odds for this age bucket ' + (c.ageMedian * 100).toFixed(1) + '%</dd>' +
       '<dt>Implied value</dt><dd><strong>' + fmtMoney(c.implied) + '</strong> — recomputed in this page from the fitted curve × growth × odds; ' + (match ? 'it matches the board.' : 'it does NOT match the board.') + ' This is an estimate, not a price.</dd>' +
       '<dt>Farm verdict</dt><dd><span class="verdict ' + farm.verdict + '">' + farm.verdict + '</span> — expected value $' + farm.value.toLocaleString('en-US') + ' (implied × 10% ÷ ' + farm.farmers.toLocaleString('en-US') + ' farmers), cost $' + farm.cost.toLocaleString('en-US') + ' (capital $' + farm.capital + ' + gas $' + farm.gas + ' + ' + farm.hours + 'h × $25), net <strong>$' + farm.net.toLocaleString('en-US') + '</strong>, $' + farm.vph.toLocaleString('en-US') + '/hour.</dd>' +
       '<dt>What would change it</dt><dd>' + esc(row.farm.change_line) + '</dd></dl>' +

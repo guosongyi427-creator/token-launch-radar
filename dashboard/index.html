@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Launch Radar — radar-3</title>
+<title>Token Launch Radar — radar-4</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
   <div class="wrap">
     <p class="eyebrow">Pre-token protocols, ranked by what a launch would be worth</p>
     <h1>Token Launch Radar</h1>
-    <p class="sub">Model <strong>radar-3</strong> · Snapshot <span id="asof">2026-11-14</span> · The size curve and the launch odds are fitted on this snapshot's live-token protocols — read the model panel, not a claim. Every protocol below <strong>records no token</strong>; that is what the snapshot says, not proof it has none.</p>
+    <p class="sub">Model <strong>radar-4</strong> · Snapshot <span id="asof">2026-11-14</span> · The size curve and the launch odds are fitted on this snapshot's live-token protocols — read the model panel, not a claim. Every protocol below <strong>records no token</strong>; that is what the snapshot says, not proof it has none.</p>
     <div class="kpis" id="kpis"></div>
   </div>
 </header>
@@ -71,7 +71,8 @@
     <p class="meta">Median absolute log error: a value of 1.2 means the typical prediction is off by a factor of about e<sup>1.2</sup> ≈ 3.3. The fit is weak in absolute terms (R² ≈ 0.19) — the test is shown so you can see exactly how weak, and that it still beats a flat multiple out of sample.</p>
     <h3>Launch odds fall with no-token age</h3>
     <table class="mini" id="odds-table"></table>
-    <p class="meta">Odds = the share of protocols in the same age bucket that still record no token, smoothed toward the overall pre-token share with 20 pseudo-counts, then forced non-increasing with age. That share is then multiplied by a TVL factor and a growth factor (each bucket's pre-token share over the overall share, clamped to 0.85–1.15) and clamped to 0.05–0.95. Unknown age uses the overall share. Growth is already in the launch value; its bucket shares are too noisy (n = 6 in the top bucket) to carry more weight in the odds.</p>
+    <p class="meta" id="odds-cv"></p>
+    <p class="meta">Odds = a ridge logistic regression on all 758 protocols: P(still pre-token) from log TVL and log(1 + age), standardised, L2 penalty 10. The fitted age weight is negative, so the odds fall smoothly with no-token age instead of in bucket steps; protocols with no listed date use 1,000 days. Growth is not in the odds — it is already in the launch value. Odds are clamped to 0.05–0.95.</p>
     <h3>Category log-adjustments (fitted, shrunk toward 0)</h3>
     <ul class="mults" id="cat-adj"></ul>
     <h3>Farm verdicts — netted to the dollar</h3>
