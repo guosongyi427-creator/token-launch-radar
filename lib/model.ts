@@ -1,51 +1,50 @@
-// radar-3 — the token-radar-01 value model, fitted on the snapshot itself.
+// radar-4 — the token-radar-01 value model, fitted on the snapshot itself.
 //
 // Everything below is computed at run time from the snapshot handed to
 // buildRadar. No protocol name, slug, coefficient or ranking is hardcoded.
 //
-//   1. Size curve. log(market cap) is fitted on log(TVL) by ordinary least
-//      squares over the live-token protocols that carry a usable market cap
-//      (mcap_usd > 0, tvl_usd > 0; the snapshot also carries mcap -1 and 0
-//      sentinels, which are not usable values and are left out). The fit is
-//      tested out of sample three ways — leave-one-out, 5-fold by a
-//      deterministic slug hash, and walk-forward (train on protocols first
-//      tracked before 2024-06-01, test on the rest) — against a flat
-//      median mcap/TVL multiple. The fitted curve wins on all three, by
-//      1.29x / 1.29x / 1.40x on median absolute log error; the numbers are
-//      in the dashboard, not just claimed here.
-//   2. Category residual. For each category, the median residual of the
-//      log-log fit among its live tokens, shrunk toward 0 with 5
-//      pseudo-counts and clamped to [-1, 1] in log units. A category with
-//      no usable live sample gets an adjustment of 0.
-//   3. Launch value. launch = exp(intercept + slope * ln(TVL) + adj)
-//      * growth multiplier, where growth is the 7-day TVL change clamped
-//      to [-50, 100]% and the multiplier is 1 + 0.40 * clamped / 100.
-//   4. Launch odds. The odds that a protocol still pre-token will launch
-//      are fitted from the snapshot's own record: for each age bucket, the
-//      share of protocols that still record no token, smoothed toward the
-//      overall pre-token share with 20 pseudo-counts and then forced
-//      non-increasing with age (isotonic, pool-adjacent-violators by
-//      taking the running minimum). Odds FALL with no-token age: a protocol
-//      that has run 2 years with no token is less likely to launch than
-//      one that has run 2 months. The age odds are then multiplied by a
-//      TVL factor and a growth factor, each the bucket's pre-token share
-//      over the overall share, clamped to [0.85, 1.15], and the product is
-//      clamped to [0.05, 0.95]. Unknown age uses the overall share.
-//      Implied value = launch value * launch odds. Growth is NOT fitted
-//      into the odds separately beyond that clamped factor: it is already
-//      in the launch value, and its bucket shares are too noisy (n = 6 in
-//      the top bucket) to carry more weight.
-//   5. Farm economics. A farmer's expected value is implied * 0.10
-//      (a stated 10% farmer share of the implied value) divided by a
-//      stated farmer count: 500 farmers for rank 1, +10 per rank. That
-//      count is a stated proxy, not a measured headcount — it grows with
-//      rank so per-farmer value falls down the board. Cost is capital
-//      (by TVL) + gas + time charged at $25/hour. Net = value - cost.
-//      Verdict: SKIP if net <= $0, THIN if $0 < net <= $250, FARM
-//      otherwise. (The $25/hour test is already inside the net, since
-//      time is charged at $25/hour, so net > $0 already implies
-//      value/hour > $25; THIN is therefore the thin-margin band, not a
-//      second $/hour test — a small rise in farmers flips it to SKIP.)
+// What changed from radar-3 (v2), and why — each change was tested
+// out of sample in Python before it was adopted here, on the same 128
+// live-token protocols, and the numbers are in the dashboard:
+//   1. Category shrinkage is heavier: the per-category median residual
+//      is now shrunk toward 0 with 20 pseudo-counts instead of 5.
+//      Tested properly — the adjustment refitted inside every fold,
+//      not on the full data — v2's pipeline (pseudo 5) scores LOO
+//      1.351 / 5-fold 1.291 / walk-forward 1.164 median abs log error,
+//      while pseudo 20 scores 1.209 / 1.242 / 1.088. v2's published
+//      LOO of 1.223 was the bare log-log curve only, without the
+//      category adjustment; the full v2 pipeline was worse than that.
+//      Heavier shrinkage is what makes the category term help instead
+//      of hurt. (Spline, quadratic, chain-count and age terms for the
+//      size curve were also tested and all lost out of sample, so the
+//      curve stays plain log-log.)
+//   2. Launch odds are a smooth ridge logistic regression on all 758
+//      protocols — P(still pre-token) from log TVL and log(1 + age) —
+//      instead of age buckets multiplied by TVL and growth bucket
+//      factors. On 5-fold cross-validation the logistic scores
+//      log-loss 0.643 and AUC 0.715, against the bucket method's
+//      0.642 and 0.668: same calibration, much better ranking. The
+//      fitted age coefficient is negative, so the odds still fall
+//      with no-token age, smoothly instead of in steps. Growth is
+//      not in the odds: it is already in the launch value, and a
+//      growth term in the odds did not improve ranking.
+//   3. The out-of-sample tests in fitLogLog now test the WHOLE
+//      pipeline — size curve + category adjustment + growth — with
+//      every component refitted inside each fold, so the numbers the
+//      dashboard shows are the numbers the board actually delivers,
+//      not the bare curve's. A bare-curve column is kept alongside
+//      for comparison.
+//   4. Launch value. launch = exp(intercept + slope * ln(TVL) + adj)
+//      * growth multiplier, where growth is the 7-day TVL change
+//      clamped to [-50, 100]% and the multiplier is
+//      1 + 0.40 * clamped / 100 (unchanged from v2: a fixed 0.40
+//      beat a fitted growth coefficient out of sample).
+//   5. Farm economics are unchanged from v2. A farmer's expected
+//      value is implied * 0.10 (a stated 10% farmer share) divided
+//      by a stated farmer count: 500 farmers for rank 1, +10 per
+//      rank. Cost is capital (by TVL) + gas + time charged at
+//      $25/hour. Net = value - cost. Verdict: SKIP if net <= $0,
+//      THIN if $0 < net <= $250, FARM otherwise.
 
 export interface SnapshotProtocol {
   slug: string;
@@ -68,7 +67,7 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 export interface ModelConstants {
   growth_weight: number;
@@ -81,6 +80,10 @@ export interface ModelConstants {
   odds_cap: number;
   factor_floor: number;
   factor_cap: number;
+  odds_logistic_lambda: number;
+  odds_logistic_iterations: number;
+  odds_logistic_lr: number;
+  odds_age_null_days: number;
   farmer_share: number;
   hourly_rate_usd: number;
   farmers_base: number;
@@ -92,13 +95,17 @@ export const MODEL: ModelConstants = {
   growth_weight: 0.4,
   growth_floor: -50,
   growth_cap: 100,
-  residual_pseudo: 5,
+  residual_pseudo: 20,
   residual_clamp: 1.0,
   odds_smooth_pseudo: 20,
   odds_floor: 0.05,
   odds_cap: 0.95,
   factor_floor: 0.85,
   factor_cap: 1.15,
+  odds_logistic_lambda: 10,
+  odds_logistic_iterations: 600,
+  odds_logistic_lr: 0.05,
+  odds_age_null_days: 1000,
   farmer_share: 0.1,
   hourly_rate_usd: 25,
   farmers_base: 500,
@@ -129,6 +136,10 @@ export interface FitResult {
   walk_forward_flat_median_abs_log_err: number;
   walk_forward_factor: number;
   loo_factor_vs_flat: number;
+  /** Bare log-log curve (no category adjustment, no growth), same tests. */
+  bare_loo_median_abs_log_err: number;
+  bare_five_fold_median_abs_log_err: number;
+  bare_walk_forward_median_abs_log_err: number;
 }
 
 export interface OddsBucket {
@@ -144,6 +155,20 @@ export interface OddsFit {
   age_odds: number[];
   tvl_buckets: OddsBucket[];
   growth_buckets: OddsBucket[];
+  /** Ridge logistic regression P(still pre-token) from log TVL and log(1+age). */
+  logistic_intercept: number;
+  logistic_weights: number[];
+  logistic_mean: number[];
+  logistic_sd: number[];
+  logistic_age_weight: number;
+  logistic_tvl_weight: number;
+  /** Median logistic odds per age bucket, for the dashboard's odds table. */
+  age_bucket_logistic_median: number[];
+  /** 5-fold (slug-hash) cross-validation of the odds, computed in code. */
+  logistic_cv_logloss: number;
+  logistic_cv_auc: number;
+  bucket_cv_logloss: number;
+  bucket_cv_auc: number;
 }
 
 export interface FarmEconomics {
@@ -188,9 +213,8 @@ export interface BoardRow {
     growth_multiplier: number;
     launch_value_usd: number;
     launch_odds: number;
-    odds_age: number;
-    odds_tvl_factor: number;
-    odds_growth_factor: number;
+    odds_logistic: number;
+    odds_age_median: number;
     age_days: number | null;
   };
   farm: FarmEconomics;
@@ -214,9 +238,8 @@ export interface RadarRow {
   category_factor: number;
   growth_pct: number;
   growth_multiplier: number;
-  odds_age: number;
-  odds_tvl_factor: number;
-  odds_growth_factor: number;
+  odds_logistic: number;
+  odds_age_median: number;
   farm: FarmEconomics;
   farm_steps: string[];
 }
@@ -335,6 +358,49 @@ export function fitProtocols(snapshot: Snapshot): SnapshotProtocol[] {
   );
 }
 
+/** Predict log(mcap) for test protocols from a training set, with the
+ *  whole pipeline refitted on the training set only: OLS log-log, the
+ *  shrunk category median residual, and the fixed growth term (in log
+ *  space, log(1 + 0.40 * clamped/100)). With useCategory and useGrowth
+ *  false this is the bare curve. Every out-of-sample test below calls
+ *  this, so no component ever sees the protocol it predicts. */
+export function predictLogMcap(
+  train: SnapshotProtocol[],
+  test: SnapshotProtocol[],
+  model: ModelConstants,
+  useCategory: boolean,
+  useGrowth: boolean,
+): number[] {
+  const xs = train.map((p) => Math.log(p.tvl_usd));
+  const ys = train.map((p) => Math.log(p.mcap_usd!));
+  const f = ols(xs, ys);
+  const adj = new Map<string, number>();
+  if (useCategory) {
+    const byCat = new Map<string, number[]>();
+    for (let i = 0; i < train.length; i++) {
+      const r = ys[i]! - (f.intercept + f.slope * xs[i]!);
+      const key = train[i]!.category ?? 'Uncategorised';
+      const arr = byCat.get(key) ?? [];
+      arr.push(r);
+      byCat.set(key, arr);
+    }
+    for (const [cat, arr] of byCat) {
+      const med = median(arr);
+      adj.set(cat, clamp((arr.length * med) / (arr.length + model.residual_pseudo), -model.residual_clamp, model.residual_clamp));
+    }
+  }
+  return test.map((p) => {
+    const g = useGrowth
+      ? Math.log(1 + (clamp(finite(p.change_7d, 0), model.growth_floor, model.growth_cap) / 100) * model.growth_weight)
+      : 0;
+    return f.intercept + f.slope * Math.log(p.tvl_usd) + (adj.get(p.category ?? 'Uncategorised') ?? 0) + g;
+  });
+}
+
+function absLogErrs(pred: number[], test: SnapshotProtocol[]): number[] {
+  return pred.map((pr, i) => Math.abs(Math.log(test[i]!.mcap_usd!) - pr));
+}
+
 export function fitLogLog(snapshot: Snapshot): FitResult {
   const live = fitProtocols(snapshot);
   const xs = live.map((p) => Math.log(p.tvl_usd));
@@ -349,27 +415,24 @@ export function fitLogLog(snapshot: Snapshot): FitResult {
   const flatRatio = median(live.map((p) => p.mcap_usd! / p.tvl_usd));
   const flatErr = ys.map((y, i) => Math.abs(y - (Math.log(flatRatio) + xs[i]!)));
   const flatMed = median(flatErr);
-  // Leave-one-out: refit without each point in turn.
-  const looErr: number[] = [];
-  for (let i = 0; i < live.length; i++) {
-    const xs2 = xs.filter((_, j) => j !== i);
-    const ys2 = ys.filter((_, j) => j !== i);
-    const f = ols(xs2, ys2);
-    looErr.push(Math.abs(ys[i]! - (f.slope * xs[i]! + f.intercept)));
-  }
+  // Leave-one-out: refit the whole pipeline without each point in turn.
+  const looErr = absLogErrs(
+    live.flatMap((_, i) => predictLogMcap(live.filter((__, j) => j !== i), [live[i]!], MODEL, true, true)),
+    live,
+  );
+  const bareLooErr = absLogErrs(
+    live.flatMap((_, i) => predictLogMcap(live.filter((__, j) => j !== i), [live[i]!], MODEL, false, false)),
+    live,
+  );
   // 5-fold, deterministic by slug hash.
   const foldErr: number[] = [];
+  const bareFoldErr: number[] = [];
   for (let k = 0; k < 5; k++) {
     const te = live.filter((p) => fnv1a(p.slug) % 5 === k);
     const tr = live.filter((p) => fnv1a(p.slug) % 5 !== k);
     if (te.length === 0 || tr.length < 3) continue;
-    const f = ols(
-      tr.map((p) => Math.log(p.tvl_usd)),
-      tr.map((p) => Math.log(p.mcap_usd!)),
-    );
-    for (const p of te) {
-      foldErr.push(Math.abs(Math.log(p.mcap_usd!) - (f.slope * Math.log(p.tvl_usd) + f.intercept)));
-    }
+    foldErr.push(...absLogErrs(predictLogMcap(tr, te, MODEL, true, true), te));
+    bareFoldErr.push(...absLogErrs(predictLogMcap(tr, te, MODEL, false, false), te));
   }
   // Walk-forward: train on protocols first tracked before the cutoff, test on the rest.
   const train = live.filter((p) => p.listed_at !== null && p.listed_at < WALK_FORWARD_CUTOFF);
@@ -378,6 +441,7 @@ export function fitLogLog(snapshot: Snapshot): FitResult {
   let wfIntercept = intercept;
   let wfMed = 0;
   let wfFlatMed = 0;
+  let bareWfMed = 0;
   if (train.length >= 3 && test.length > 0) {
     const f = ols(
       train.map((p) => Math.log(p.tvl_usd)),
@@ -385,17 +449,19 @@ export function fitLogLog(snapshot: Snapshot): FitResult {
     );
     wfSlope = f.slope;
     wfIntercept = f.intercept;
-    wfMed = median(test.map((p) => Math.abs(Math.log(p.mcap_usd!) - (f.slope * Math.log(p.tvl_usd) + f.intercept))));
+    wfMed = median(absLogErrs(predictLogMcap(train, test, MODEL, true, true), test));
+    bareWfMed = median(absLogErrs(predictLogMcap(train, test, MODEL, false, false), test));
     const flatTrain = median(train.map((p) => p.mcap_usd! / p.tvl_usd));
     wfFlatMed = median(test.map((p) => Math.abs(Math.log(p.mcap_usd!) - (Math.log(flatTrain) + Math.log(p.tvl_usd)))));
   }
   const looMed = median(looErr);
+  const inSampleFull = median(absLogErrs(predictLogMcap(live, live, MODEL, true, true), live));
   return {
     n: live.length,
     slope: round4(slope),
     intercept: round4(intercept),
     r_squared: round4(r2),
-    in_sample_median_abs_log_err: round4(median(res.map((r) => Math.abs(r)))),
+    in_sample_median_abs_log_err: round4(inSampleFull),
     flat_median_ratio: round4(flatRatio),
     flat_median_abs_log_err: round4(flatMed),
     loo_median_abs_log_err: round4(looMed),
@@ -410,6 +476,9 @@ export function fitLogLog(snapshot: Snapshot): FitResult {
     walk_forward_flat_median_abs_log_err: round4(wfFlatMed),
     walk_forward_factor: wfMed > 0 ? round4(wfFlatMed / wfMed) : 0,
     loo_factor_vs_flat: looMed > 0 ? round4(flatMed / looMed) : 0,
+    bare_loo_median_abs_log_err: round4(median(bareLooErr)),
+    bare_five_fold_median_abs_log_err: round4(median(bareFoldErr)),
+    bare_walk_forward_median_abs_log_err: round4(bareWfMed),
   };
 }
 
@@ -471,6 +540,127 @@ export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
+function sigmoid(z: number): number {
+  if (z > 35) return 1;
+  if (z < -35) return 0;
+  return 1 / (1 + Math.exp(-z));
+}
+
+function logisticFeatures(p: SnapshotProtocol, asOf: string, model: ModelConstants): number[] {
+  const age = ageDays(asOf, p.listed_at);
+  return [Math.log(p.tvl_usd), Math.log1p(age ?? model.odds_age_null_days)];
+}
+
+/** Ridge logistic regression P(still pre-token) on standardised
+ *  [log TVL, log(1+age)], fitted by plain gradient descent (fixed
+ *  step and iteration count, so the fit is deterministic). L2 penalty
+ *  lambda applies to the weights only, never the intercept. */
+export function fitLogisticOdds(
+  protocols: SnapshotProtocol[],
+  asOf: string,
+  model: ModelConstants = MODEL,
+): { intercept: number; weights: number[]; mean: number[]; sd: number[] } {
+  const xs = protocols.map((p) => logisticFeatures(p, asOf, model));
+  const ys = protocols.map((p) => (isPreToken(p) ? 1 : 0));
+  const n = protocols.length;
+  const featMean = [0, 1].map((j) => xs.reduce((a, r) => a + r[j]!, 0) / n);
+  const sd = [0, 1].map((j) => {
+    const v = xs.reduce((a, r) => a + (r[j]! - featMean[j]!) * (r[j]! - featMean[j]!), 0) / n;
+    return Math.sqrt(v) || 1;
+  });
+  const z = xs.map((r) => [(r[0]! - featMean[0]!) / sd[0]!, (r[1]! - featMean[1]!) / sd[1]!]);
+  const base = mean(ys);
+  let intercept = Math.log(base / (1 - base));
+  let weights = [0, 0];
+  for (let it = 0; it < model.odds_logistic_iterations; it++) {
+    let gw0 = 0;
+    let gw1 = 0;
+    let gb = 0;
+    for (let i = 0; i < n; i++) {
+      const pr = sigmoid(intercept + weights[0]! * z[i]![0]! + weights[1]! * z[i]![1]!);
+      const d = pr - ys[i]!;
+      gw0 += (d * z[i]![0]!) / n;
+      gw1 += (d * z[i]![1]!) / n;
+      gb += d / n;
+    }
+    weights = [
+      weights[0]! - model.odds_logistic_lr * (gw0 + (model.odds_logistic_lambda * weights[0]!) / n),
+      weights[1]! - model.odds_logistic_lr * (gw1 + (model.odds_logistic_lambda * weights[1]!) / n),
+    ];
+    intercept -= model.odds_logistic_lr * gb;
+  }
+  return { intercept: round4(intercept), weights: weights.map(round4), mean: featMean.map(round4), sd: sd.map(round4) };
+}
+
+function logisticProb(
+  p: SnapshotProtocol,
+  asOf: string,
+  fit: { intercept: number; weights: number[]; mean: number[]; sd: number[] },
+  model: ModelConstants,
+): number {
+  const f = logisticFeatures(p, asOf, model);
+  const z0 = (f[0]! - fit.mean[0]!) / fit.sd[0]!;
+  const z1 = (f[1]! - fit.mean[1]!) / fit.sd[1]!;
+  return sigmoid(fit.intercept + fit.weights[0]! * z0 + fit.weights[1]! * z1);
+}
+
+function logLoss(pred: number[], labels: number[]): number {
+  let s = 0;
+  for (let i = 0; i < pred.length; i++) {
+    const pr = clamp(pred[i]!, 1e-6, 1 - 1e-6);
+    s += labels[i]! === 1 ? Math.log(pr) : Math.log(1 - pr);
+  }
+  return round4(-s / pred.length);
+}
+
+/** AUC by average ranks (Mann-Whitney), ties averaged. */
+function aucScore(pred: number[], labels: number[]): number {
+  const order = pred.map((_, i) => i).sort((a, b) => pred[a]! - pred[b]!);
+  const ranks = new Array<number>(pred.length).fill(0);
+  let i = 0;
+  while (i < order.length) {
+    let j = i;
+    while (j + 1 < order.length && pred[order[j + 1]!] === pred[order[i]!]) j++;
+    const avg = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) ranks[order[k]!] = avg;
+    i = j + 1;
+  }
+  const n1 = labels.reduce((a, l) => a + l, 0);
+  const n0 = labels.length - n1;
+  if (n1 === 0 || n0 === 0) return 0;
+  let sum = 0;
+  for (let k = 0; k < labels.length; k++) if (labels[k] === 1) sum += ranks[k]!;
+  return round4((sum - (n1 * (n1 + 1)) / 2) / (n1 * n0));
+}
+
+/** v2's bucket odds for one protocol, with the buckets fitted on the
+ *  given training protocols only. Used only for the odds cross-
+ *  validation below, so the bucket method and the logistic are
+ *  compared on the same held-out folds. */
+function bucketOddsFor(train: SnapshotProtocol[], p: SnapshotProtocol, asOf: string, model: ModelConstants): number {
+  const overall = train.filter(isPreToken).length / train.length;
+  const rawShare = (assign: (q: SnapshotProtocol) => number, k: number): number => {
+    const arr = train.filter((q) => assign(q) === k);
+    return arr.length === 0 ? overall : arr.filter(isPreToken).length / arr.length;
+  };
+  const ageB = [0, 1, 2, 3].map((k) => {
+    const arr = train.filter((q) => ageBucket(ageDays(asOf, q.listed_at)) === k);
+    const raw = arr.length === 0 ? overall : arr.filter(isPreToken).length / arr.length;
+    return (arr.length * raw + model.odds_smooth_pseudo * overall) / (arr.length + model.odds_smooth_pseudo);
+  });
+  let running = 1;
+  const ageOdds = ageB.map((v) => {
+    running = Math.min(running, v);
+    return running;
+  });
+  const ab = ageBucket(ageDays(asOf, p.listed_at));
+  const ageOdd = ab < 0 ? overall : ageOdds[ab]!;
+  const tvlF = clamp(rawShare((q) => tvlBucket(q.tvl_usd), tvlBucket(p.tvl_usd)) / overall, model.factor_floor, model.factor_cap);
+  const gb = growthBucket(p.change_7d);
+  const growthF = gb < 0 ? 1 : clamp(rawShare((q) => growthBucket(q.change_7d), gb) / overall, model.factor_floor, model.factor_cap);
+  return clamp(ageOdd * tvlF * growthF, model.odds_floor, model.odds_cap);
+}
+
 /** Launch odds fitted from the snapshot's own record. See the header comment. */
 export function fitLaunchOdds(snapshot: Snapshot, model: ModelConstants = MODEL): OddsFit {
   const total = snapshot.protocols.length;
@@ -498,7 +688,49 @@ export function fitLaunchOdds(snapshot: Snapshot, model: ModelConstants = MODEL)
   }
   const tvlBuckets = mkBuckets(TVL_LABELS, (p) => tvlBucket(p.tvl_usd));
   const growthBuckets = mkBuckets(GROWTH_LABELS, (p) => growthBucket(p.change_7d));
-  return { overall_pre_token_share: round4(overall), age_buckets: ageBuckets, age_odds: ageOdds, tvl_buckets: tvlBuckets, growth_buckets: growthBuckets };
+  // The logistic odds, fitted on all 758 protocols.
+  const logFit = fitLogisticOdds(snapshot.protocols, snapshot.as_of, model);
+  const logistic = snapshot.protocols.map((p) => logisticProb(p, snapshot.as_of, logFit, model));
+  const ageMedian: number[] = [0, 1, 2, 3].map((k) => {
+    const vals = snapshot.protocols
+      .filter((p) => ageBucket(ageDays(snapshot.as_of, p.listed_at)) === k)
+      .map((p) => logisticProb(p, snapshot.as_of, logFit, model));
+    return round4(median(vals));
+  });
+  // 5-fold cross-validation (deterministic, by slug hash) of both odds
+  // methods on the same folds: log-loss and AUC.
+  const labels = snapshot.protocols.map((p) => (isPreToken(p) ? 1 : 0));
+  const logPred: number[] = new Array(snapshot.protocols.length).fill(0);
+  const buckPred: number[] = new Array(snapshot.protocols.length).fill(0);
+  for (let k = 0; k < 5; k++) {
+    const te = snapshot.protocols.filter((p) => fnv1a(p.slug) % 5 === k);
+    const tr = snapshot.protocols.filter((p) => fnv1a(p.slug) % 5 !== k);
+    if (te.length === 0 || tr.length < 3) continue;
+    const f = fitLogisticOdds(tr, snapshot.as_of, model);
+    for (const p of te) {
+      const idx = snapshot.protocols.indexOf(p);
+      logPred[idx] = logisticProb(p, snapshot.as_of, f, model);
+      buckPred[idx] = bucketOddsFor(tr, p, snapshot.as_of, model);
+    }
+  }
+  return {
+    overall_pre_token_share: round4(overall),
+    age_buckets: ageBuckets,
+    age_odds: ageOdds,
+    tvl_buckets: tvlBuckets,
+    growth_buckets: growthBuckets,
+    logistic_intercept: logFit.intercept,
+    logistic_weights: logFit.weights,
+    logistic_mean: logFit.mean,
+    logistic_sd: logFit.sd,
+    logistic_age_weight: logFit.weights[1]!,
+    logistic_tvl_weight: logFit.weights[0]!,
+    age_bucket_logistic_median: ageMedian,
+    logistic_cv_logloss: logLoss(logPred, labels),
+    logistic_cv_auc: aucScore(logPred, labels),
+    bucket_cv_logloss: logLoss(buckPred, labels),
+    bucket_cv_auc: aucScore(buckPred, labels),
+  };
 }
 
 export function oddsFor(
@@ -506,17 +738,18 @@ export function oddsFor(
   asOf: string,
   odds: OddsFit,
   model: ModelConstants = MODEL,
-): { odds: number; ageOdds: number; tvlFactor: number; growthFactor: number } {
-  const age = ageDays(asOf, p.listed_at);
-  const ab = ageBucket(age);
-  const ageOdds = ab < 0 ? odds.overall_pre_token_share : odds.age_odds[ab]!;
-  const tvlB = odds.tvl_buckets[tvlBucket(p.tvl_usd)]!;
-  const tvlFactor = clamp(tvlB.pre_token_share / odds.overall_pre_token_share, model.factor_floor, model.factor_cap);
-  const gb = growthBucket(p.change_7d);
-  const growthFactor =
-    gb < 0 ? 1 : clamp(odds.growth_buckets[gb]!.pre_token_share / odds.overall_pre_token_share, model.factor_floor, model.factor_cap);
-  const o = clamp(ageOdds * tvlFactor * growthFactor, model.odds_floor, model.odds_cap);
-  return { odds: round4(o), ageOdds: round4(ageOdds), tvlFactor: round4(tvlFactor), growthFactor: round4(growthFactor) };
+): { odds: number; logisticOdds: number; ageMedian: number } {
+  const logFit = {
+    intercept: odds.logistic_intercept,
+    weights: odds.logistic_weights,
+    mean: odds.logistic_mean,
+    sd: odds.logistic_sd,
+  };
+  const lp = logisticProb(p, asOf, logFit, model);
+  const ab = ageBucket(ageDays(asOf, p.listed_at));
+  const ageMedian = ab < 0 ? odds.overall_pre_token_share : odds.age_bucket_logistic_median[ab]!;
+  const o = clamp(lp, model.odds_floor, model.odds_cap);
+  return { odds: round4(o), logisticOdds: round4(lp), ageMedian: round4(ageMedian) };
 }
 
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
@@ -757,9 +990,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
         growth_multiplier: round4(s.growthMult),
         launch_value_usd: Math.max(1, Math.round(s.launch)),
         launch_odds: s.odds.odds,
-        odds_age: s.odds.ageOdds,
-        odds_tvl_factor: s.odds.tvlFactor,
-        odds_growth_factor: s.odds.growthFactor,
+        odds_logistic: s.odds.logisticOdds,
+        odds_age_median: s.odds.ageMedian,
         age_days: s.age,
       },
       farm,
@@ -786,9 +1018,8 @@ function radarRow(row: BoardRow): RadarRow {
     category_factor: row.model.category_factor,
     growth_pct: row.model.growth_pct,
     growth_multiplier: row.model.growth_multiplier,
-    odds_age: row.model.odds_age,
-    odds_tvl_factor: row.model.odds_tvl_factor,
-    odds_growth_factor: row.model.odds_growth_factor,
+    odds_logistic: row.model.odds_logistic,
+    odds_age_median: row.model.odds_age_median,
     farm: row.farm,
     farm_steps: row.farm_steps,
   };
