@@ -1,10 +1,12 @@
-// Token Launch Radar dashboard — radar-4. Static only: reads window.RADAR
+// Token Launch Radar dashboard — radar-5. Static only: reads window.RADAR
 // from data.js, no fetch, no network. Recomputes every row in the page
 // from the fitted curve and the fitted odds, so the page must agree with
 // board.json exactly. The recompute below mirrors lib/model.ts step for
-// step: log-log fit, category log-adjustment (20 pseudo-counts), growth
-// multiplier, then the ridge logistic launch odds from log TVL and
-// log(1 + age), then the farm verdict.
+// step: log-log fit, category log-adjustment (30 pseudo-counts), growth
+// multiplier, then the ridge logistic launch odds on eight features
+// (log TVL, log(1 + age), log(1 + chains), 7-day change, two quadratic
+// terms and their product, and the category pre-token rate), then the
+// farm verdict.
 (function () {
   var D = window.RADAR;
   if (!D) { document.getElementById('rows').innerHTML = '<tr><td colspan="8">No data loaded.</td></tr>'; return; }
@@ -23,12 +25,20 @@
   var clamp = function (v, lo, hi) { return Math.min(hi, Math.max(lo, v)); };
 
   function sigmoid(z) { if (z > 35) return 1; if (z < -35) return 0; return 1 / (1 + Math.exp(-z)); }
+  function catRateFor(row) {
+    var r = O.category_pre_token_rate[row.category || 'Uncategorised'];
+    return r === undefined ? O.overall_pre_token_share : r;
+  }
   function logisticOdds(row) {
     var lt = Math.log(row.tvl_usd);
-    var age = row.age_days === null || row.age_days === undefined ? 1000 : row.age_days;
-    var z0 = (lt - O.logistic_mean[0]) / O.logistic_sd[0];
-    var z1 = (Math.log(1 + age) - O.logistic_mean[1]) / O.logistic_sd[1];
-    return sigmoid(O.logistic_intercept + O.logistic_weights[0] * z0 + O.logistic_weights[1] * z1);
+    var age = row.age_days === null || row.age_days === undefined ? 2000 : row.age_days;
+    var la = Math.log(1 + age);
+    var g = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
+    g = clamp(g, M.growth_floor, M.growth_cap) / 100;
+    var f = [lt, la, Math.log(1 + row.chains.length), g, lt * lt, la * la, lt * la, catRateFor(row)];
+    var s = O.logistic_intercept;
+    for (var j = 0; j < f.length; j++) s += O.logistic_weights[j] * ((f[j] - O.logistic_mean[j]) / O.logistic_sd[j]);
+    return sigmoid(s);
   }
   function ageBucket(age) { if (age === null || age === undefined) return -1; if (age < 180) return 0; if (age < 365) return 1; if (age < 730) return 2; return 3; }
   function capitalFor(tvl) { if (tvl >= 5e9) return 250; if (tvl >= 1e9) return 150; if (tvl >= 1e8) return 100; return 50; }
@@ -46,7 +56,7 @@
     var ageMedian = ab < 0 ? O.overall_pre_token_share : O.age_bucket_logistic_median[ab];
     var odds = Math.round(clamp(lp, M.odds_floor, M.odds_cap) * 1e4) / 1e4;
     var implied = Math.max(1, Math.round(launch * odds));
-    return { catAdj: catAdj, growthPct: g, growthMult: growthMult, launch: launch, logisticOdds: lp, ageMedian: ageMedian, odds: odds, implied: implied };
+    return { catAdj: catAdj, growthPct: g, growthMult: growthMult, launch: launch, logisticOdds: lp, ageMedian: ageMedian, catRate: catRateFor(row), odds: odds, implied: implied };
   }
 
   function farmFor(row, implied) {
@@ -82,11 +92,11 @@
     '<p><strong>Fitted size curve.</strong> log(market cap) = <strong>' + F.intercept + ' + ' + F.slope + ' × log(TVL)</strong>, fitted by least squares on ' + F.n +
     ' live-token protocols with a usable market cap (mcap &gt; 0; the snapshot also carries −1 and 0 sentinels, left out). R² = ' + F.r_squared +
     '. A flat median mcap/TVL multiple of ' + F.flat_median_ratio + ' is the baseline the fit is tested against.</p>' +
-    '<p><strong>Category adjustment.</strong> Each category’s median residual from that curve, shrunk toward 0 with 20 pseudo-counts and clamped to ±1 in log units — e.g. Lending ' +
+    '<p><strong>Category adjustment.</strong> Each category’s median residual from that curve, shrunk toward 0 with 30 pseudo-counts and clamped to ±1 in log units — e.g. Lending ' +
     (D.category_log_adj.Lending !== undefined ? D.category_log_adj.Lending.toFixed(3) : 'n/a') + ', Dexs ' +
     (D.category_log_adj.Dexs !== undefined ? D.category_log_adj.Dexs.toFixed(3) : 'n/a') + ', RWA ' +
     (D.category_log_adj.RWA !== undefined ? D.category_log_adj.RWA.toFixed(3) : 'n/a') + '. The tests below refit the whole pipeline — curve, category adjustment and growth — inside every fold, so they are the numbers this board delivers, not the bare curve’s. Full list below.</p>' +
-    '<p><strong>Launch odds.</strong> A ridge logistic regression on all ' + D.census_total + ' protocols: P(still pre-token) from log TVL and log(1 + age). Standardised weights: TVL ' + O.logistic_tvl_weight + ', age ' + O.logistic_age_weight + ' — the age weight is negative, so the odds fall with no-token age, smoothly instead of in steps. 5-fold cross-validation: log-loss ' + O.logistic_cv_logloss + ', AUC ' + O.logistic_cv_auc + ', against the old age-bucket method’s ' + O.bucket_cv_logloss + ' / ' + O.bucket_cv_auc + ' on the same folds.</p>';
+    '<p><strong>Launch odds.</strong> A ridge logistic regression on all ' + D.census_total + ' protocols: P(still pre-token) from eight features — log TVL, log(1 + age), log(1 + chains), the clamped 7-day change, the quadratic terms log(TVL)², log(1 + age)² and their product, and the category pre-token rate. Standardised weights: TVL ' + O.logistic_tvl_weight + ', age ' + O.logistic_age_weight + ', category rate ' + (O.logistic_weights[7] !== undefined ? O.logistic_weights[7] : 'n/a') + ' — the age weight is negative, so the odds fall with no-token age, smoothly instead of in steps. 5-fold cross-validation: log-loss ' + O.logistic_cv_logloss + ', AUC ' + O.logistic_cv_auc + ', against the old age-bucket method’s ' + O.bucket_cv_logloss + ' / ' + O.bucket_cv_auc + ' on the same folds. The category rate is the single biggest gain: categories where most protocols are still pre-token lift a protocol’s odds.</p>';
   document.getElementById('oos-table').innerHTML =
     '<thead><tr><th>Test</th><th>Full pipeline</th><th>Flat multiple</th><th>Factor</th></tr></thead><tbody>' +
     '<tr><td>Leave-one-out (n=' + F.n + ')</td><td>' + F.loo_median_abs_log_err + '</td><td>' + F.flat_median_abs_log_err + '</td><td>' + F.loo_factor_vs_flat + '×</td></tr>' +
@@ -100,7 +110,11 @@
       return '<tr><td>' + esc(b.label) + '</td><td>' + b.n + '</td><td>' + (b.pre_token_share * 100).toFixed(1) + '%</td><td>' + (b.smoothed_odds * 100).toFixed(1) + '%</td><td><strong>' + (O.age_bucket_logistic_median[i] * 100).toFixed(1) + '%</strong></td></tr>';
     }).join('') + '</tbody>';
   document.getElementById('odds-cv').textContent =
-    'Odds cross-validation (5-fold, by slug hash, same folds for both): logistic log-loss ' + O.logistic_cv_logloss + ' and AUC ' + O.logistic_cv_auc + '; age-bucket method ' + O.bucket_cv_logloss + ' and ' + O.bucket_cv_auc + '. Same calibration, better ranking. The bucket shares above are descriptive — the odds actually used are the smooth logistic ones.';
+    'Odds cross-validation (5-fold, by slug hash, same folds for both): logistic log-loss ' + O.logistic_cv_logloss + ' and AUC ' + O.logistic_cv_auc + '; age-bucket method ' + O.bucket_cv_logloss + ' and ' + O.bucket_cv_auc + '. Better calibration and better ranking. The bucket shares above are descriptive — the odds actually used are the smooth logistic ones.';
+  document.getElementById('cat-rate').innerHTML = Object.keys(O.category_pre_token_rate).sort().map(function (c) {
+    var r = O.category_pre_token_rate[c];
+    return '<li>' + esc(c) + ': <strong>' + (r * 100).toFixed(1) + '%</strong> still pre-token</li>';
+  }).join('');
   document.getElementById('cat-adj').innerHTML = Object.keys(D.category_log_adj).sort().map(function (c) {
     var adj = D.category_log_adj[c];
     return '<li>' + esc(c) + ' (n=' + (D.category_n[c] || 0) + '): <strong>' + adj.toFixed(3) + '</strong> → ×' + Math.exp(adj).toFixed(3) + '</li>';
@@ -193,7 +207,7 @@
       '<dt>Age with no token</dt><dd>' + fmtAge(row.age_days) + (row.listed_at ? ' · first tracked ' + esc(row.listed_at) : '') + '</dd>' +
       '<dt>Fitted curve</dt><dd>exp(' + F.intercept + ' + ' + F.slope + ' × ln(TVL) + ' + c.catAdj.toFixed(3) + ') = ' + fmtMoney(c.launch / c.growthMult) + ' before growth; × ' + c.growthMult.toFixed(3) + ' growth = ' + fmtMoney(c.launch) + ' launch value</dd>' +
       '<dt>Category adjustment</dt><dd>' + c.catAdj.toFixed(3) + ' in log units (×' + Math.exp(c.catAdj).toFixed(3) + ')</dd>' +
-      '<dt>Launch odds</dt><dd>' + (c.odds * 100).toFixed(1) + '% — ridge logistic on log TVL and log(1 + age), standardised weights TVL ' + O.logistic_tvl_weight + ' / age ' + O.logistic_age_weight + '; median logistic odds for this age bucket ' + (c.ageMedian * 100).toFixed(1) + '%</dd>' +
+      '<dt>Launch odds</dt><dd>' + (c.odds * 100).toFixed(1) + '% — ridge logistic on eight features (log TVL, log(1 + age), log(1 + chains), 7-day change, two quadratic terms and their product, and this category’s pre-token rate of ' + (c.catRate * 100).toFixed(1) + '%); standardised weights TVL ' + O.logistic_tvl_weight + ' / age ' + O.logistic_age_weight + ' / category rate ' + (O.logistic_weights[7] !== undefined ? O.logistic_weights[7] : 'n/a') + '; median logistic odds for this age bucket ' + (c.ageMedian * 100).toFixed(1) + '%</dd>' +
       '<dt>Implied value</dt><dd><strong>' + fmtMoney(c.implied) + '</strong> — recomputed in this page from the fitted curve × growth × odds; ' + (match ? 'it matches the board.' : 'it does NOT match the board.') + ' This is an estimate, not a price.</dd>' +
       '<dt>Farm verdict</dt><dd><span class="verdict ' + farm.verdict + '">' + farm.verdict + '</span> — expected value $' + farm.value.toLocaleString('en-US') + ' (implied × 10% ÷ ' + farm.farmers.toLocaleString('en-US') + ' farmers), cost $' + farm.cost.toLocaleString('en-US') + ' (capital $' + farm.capital + ' + gas $' + farm.gas + ' + ' + farm.hours + 'h × $25), net <strong>$' + farm.net.toLocaleString('en-US') + '</strong>, $' + farm.vph.toLocaleString('en-US') + '/hour.</dd>' +
       '<dt>What would change it</dt><dd>' + esc(row.farm.change_line) + '</dd></dl>' +
