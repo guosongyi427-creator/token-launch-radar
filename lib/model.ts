@@ -1,44 +1,37 @@
-// radar-4 — the token-radar-01 value model, fitted on the snapshot itself.
+// radar-5 — the token-radar-01 value model, fitted on the snapshot itself.
 //
 // Everything below is computed at run time from the snapshot handed to
 // buildRadar. No protocol name, slug, coefficient or ranking is hardcoded.
 //
-// What changed from radar-3 (v2), and why — each change was tested
-// out of sample in Python before it was adopted here, on the same 128
-// live-token protocols, and the numbers are in the dashboard:
-//   1. Category shrinkage is heavier: the per-category median residual
-//      is now shrunk toward 0 with 20 pseudo-counts instead of 5.
-//      Tested properly — the adjustment refitted inside every fold,
-//      not on the full data — v2's pipeline (pseudo 5) scores LOO
-//      1.351 / 5-fold 1.291 / walk-forward 1.164 median abs log error,
-//      while pseudo 20 scores 1.209 / 1.242 / 1.088. v2's published
-//      LOO of 1.223 was the bare log-log curve only, without the
-//      category adjustment; the full v2 pipeline was worse than that.
-//      Heavier shrinkage is what makes the category term help instead
-//      of hurt. (Spline, quadratic, chain-count and age terms for the
-//      size curve were also tested and all lost out of sample, so the
-//      curve stays plain log-log.)
-//   2. Launch odds are a smooth ridge logistic regression on all 758
-//      protocols — P(still pre-token) from log TVL and log(1 + age) —
-//      instead of age buckets multiplied by TVL and growth bucket
-//      factors. On 5-fold cross-validation the logistic scores
-//      log-loss 0.643 and AUC 0.715, against the bucket method's
-//      0.642 and 0.668: same calibration, much better ranking. The
-//      fitted age coefficient is negative, so the odds still fall
-//      with no-token age, smoothly instead of in steps. Growth is
-//      not in the odds: it is already in the launch value, and a
-//      growth term in the odds did not improve ranking.
-//   3. The out-of-sample tests in fitLogLog now test the WHOLE
-//      pipeline — size curve + category adjustment + growth — with
-//      every component refitted inside each fold, so the numbers the
-//      dashboard shows are the numbers the board actually delivers,
-//      not the bare curve's. A bare-curve column is kept alongside
-//      for comparison.
-//   4. Launch value. launch = exp(intercept + slope * ln(TVL) + adj)
-//      * growth multiplier, where growth is the 7-day TVL change
-//      clamped to [-50, 100]% and the multiplier is
-//      1 + 0.40 * clamped / 100 (unchanged from v2: a fixed 0.40
-//      beat a fitted growth coefficient out of sample).
+// What changed from radar-4 (v3), and why — each change was tested
+// out of sample in Python before it was adopted here, and the numbers
+// are in the dashboard:
+//   1. Category shrinkage is heavier still: the per-category median
+//      residual is now shrunk toward 0 with 30 pseudo-counts instead
+//      of 20. LOO 1.208 -> 1.189, 5-fold 1.247 -> 1.245, walk-forward
+//      1.088 unchanged. (Pseudo 50 was tried and lost on LOO.)
+//   2. Growth carries more weight: the launch-value multiplier is now
+//      1 + 0.60 * clamped 7-day change / 100 instead of 0.40. Swept
+//      0.0-1.2 out of sample; the median error keeps falling to 1.2,
+//      but the mean error starts rising past 0.6, so 0.60 is the
+//      conservative pick: it helps typical protocols without letting
+//      one hot week dominate a valuation.
+//   3. Launch odds are a richer ridge logistic regression on all 758
+//      protocols. radar-4 used two features (log TVL, log(1+age)).
+//      radar-5 adds log(1+chains), the clamped 7-day change, the
+//      quadratic terms log(TVL)^2, log(1+age)^2 and their product,
+//      and — the biggest gain — the category's own pre-token rate
+//      (each category's share of protocols that still record no
+//      token, shrunk toward the overall share with 50 pseudo-counts).
+//      On 5-fold cross-validation the new odds score log-loss 0.578
+//      and AUC 0.766, against radar-4's 0.643 / 0.715 and the bucket
+//      method's 0.642 / 0.668 on the same folds. Unknown age now uses
+//      2000 days instead of 1000 (tested 365 / 1000 / 2000 / 3000;
+//      2000 won). The fitted age weight stays negative, so the odds
+//      still fall with no-token age.
+//   4. The size curve stays plain log-log: spline, Huber, chain-count
+//      and age terms were re-tested for radar-5 and all lost out of
+//      sample again, so they stay out.
 //   5. Farm economics are unchanged from v2. A farmer's expected
 //      value is implied * 0.10 (a stated 10% farmer share) divided
 //      by a stated farmer count: 500 farmers for rank 1, +10 per
@@ -67,7 +60,7 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 export interface ModelConstants {
   growth_weight: number;
@@ -84,6 +77,8 @@ export interface ModelConstants {
   odds_logistic_iterations: number;
   odds_logistic_lr: number;
   odds_age_null_days: number;
+  /** Pseudo-counts shrinking each category's pre-token rate toward the overall share. */
+  odds_cat_pseudo: number;
   farmer_share: number;
   hourly_rate_usd: number;
   farmers_base: number;
@@ -92,10 +87,10 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  growth_weight: 0.4,
+  growth_weight: 0.6,
   growth_floor: -50,
   growth_cap: 100,
-  residual_pseudo: 20,
+  residual_pseudo: 30,
   residual_clamp: 1.0,
   odds_smooth_pseudo: 20,
   odds_floor: 0.05,
@@ -105,7 +100,8 @@ export const MODEL: ModelConstants = {
   odds_logistic_lambda: 10,
   odds_logistic_iterations: 600,
   odds_logistic_lr: 0.05,
-  odds_age_null_days: 1000,
+  odds_age_null_days: 2000,
+  odds_cat_pseudo: 50,
   farmer_share: 0.1,
   hourly_rate_usd: 25,
   farmers_base: 500,
@@ -155,13 +151,19 @@ export interface OddsFit {
   age_odds: number[];
   tvl_buckets: OddsBucket[];
   growth_buckets: OddsBucket[];
-  /** Ridge logistic regression P(still pre-token) from log TVL and log(1+age). */
+  /** Ridge logistic regression P(still pre-token) from eight features:
+   *  log TVL, log(1+age), log(1+chains), clamped 7-day change / 100,
+   *  log(TVL)^2, log(1+age)^2, log(TVL)*log(1+age), and the category's
+   *  pre-token rate. Features are standardised before fitting. */
+  logistic_features: string[];
   logistic_intercept: number;
   logistic_weights: number[];
   logistic_mean: number[];
   logistic_sd: number[];
   logistic_age_weight: number;
   logistic_tvl_weight: number;
+  /** Each category's pre-token rate (shrunk toward the overall share). */
+  category_pre_token_rate: Record<string, number>;
   /** Median logistic odds per age bucket, for the dashboard's odds table. */
   age_bucket_logistic_median: number[];
   /** 5-fold (slug-hash) cross-validation of the odds, computed in code. */
@@ -215,6 +217,7 @@ export interface BoardRow {
     launch_odds: number;
     odds_logistic: number;
     odds_age_median: number;
+    odds_cat_rate: number;
     age_days: number | null;
   };
   farm: FarmEconomics;
@@ -240,6 +243,7 @@ export interface RadarRow {
   growth_multiplier: number;
   odds_logistic: number;
   odds_age_median: number;
+  odds_cat_rate: number;
   farm: FarmEconomics;
   farm_steps: string[];
 }
@@ -546,62 +550,118 @@ function sigmoid(z: number): number {
   return 1 / (1 + Math.exp(-z));
 }
 
-function logisticFeatures(p: SnapshotProtocol, asOf: string, model: ModelConstants): number[] {
+export const LOGISTIC_FEATURES = [
+  'log TVL',
+  'log(1 + age days)',
+  'log(1 + chains)',
+  '7-day change / 100',
+  'log(TVL)^2',
+  'log(1 + age)^2',
+  'log(TVL) x log(1 + age)',
+  'category pre-token rate',
+];
+
+/** Each category's share of protocols that still record no token,
+ *  shrunk toward the overall share with odds_cat_pseudo counts, so a
+ *  category with one or two protocols does not get a rate of 0 or 1. */
+export function categoryPreTokenRate(
+  protocols: SnapshotProtocol[],
+  model: ModelConstants = MODEL,
+): Map<string, number> {
+  const overall = protocols.filter(isPreToken).length / Math.max(1, protocols.length);
+  const byCat = new Map<string, number[]>();
+  for (const p of protocols) {
+    const key = p.category ?? 'Uncategorised';
+    const arr = byCat.get(key) ?? [];
+    arr.push(isPreToken(p) ? 1 : 0);
+    byCat.set(key, arr);
+  }
+  const out = new Map<string, number>();
+  for (const [cat, arr] of byCat) {
+    const raw = arr.reduce((a, b) => a + b, 0) / arr.length;
+    out.set(cat, (arr.length * raw + model.odds_cat_pseudo * overall) / (arr.length + model.odds_cat_pseudo));
+  }
+  return out;
+}
+
+function logisticFeatures(
+  p: SnapshotProtocol,
+  asOf: string,
+  model: ModelConstants,
+  catRate: Map<string, number>,
+  overall: number,
+): number[] {
   const age = ageDays(asOf, p.listed_at);
-  return [Math.log(p.tvl_usd), Math.log1p(age ?? model.odds_age_null_days)];
+  const a = age ?? model.odds_age_null_days;
+  const lt = Math.log(p.tvl_usd);
+  const la = Math.log1p(a);
+  const g = clamp(finite(p.change_7d, 0), model.growth_floor, model.growth_cap) / 100;
+  return [
+    lt,
+    la,
+    Math.log1p(p.chains.length),
+    g,
+    lt * lt,
+    la * la,
+    lt * la,
+    catRate.get(p.category ?? 'Uncategorised') ?? overall,
+  ];
 }
 
 /** Ridge logistic regression P(still pre-token) on standardised
- *  [log TVL, log(1+age)], fitted by plain gradient descent (fixed
- *  step and iteration count, so the fit is deterministic). L2 penalty
- *  lambda applies to the weights only, never the intercept. */
+ *  features (see LOGISTIC_FEATURES), fitted by plain gradient descent
+ *  (fixed step and iteration count, so the fit is deterministic). L2
+ *  penalty lambda applies to the weights only, never the intercept. */
 export function fitLogisticOdds(
   protocols: SnapshotProtocol[],
   asOf: string,
   model: ModelConstants = MODEL,
-): { intercept: number; weights: number[]; mean: number[]; sd: number[] } {
-  const xs = protocols.map((p) => logisticFeatures(p, asOf, model));
+): { intercept: number; weights: number[]; mean: number[]; sd: number[]; catRate: Record<string, number>; overall: number } {
+  const overall = protocols.filter(isPreToken).length / Math.max(1, protocols.length);
+  const catRate = categoryPreTokenRate(protocols, model);
+  const xs = protocols.map((p) => logisticFeatures(p, asOf, model, catRate, overall));
   const ys = protocols.map((p) => (isPreToken(p) ? 1 : 0));
   const n = protocols.length;
-  const featMean = [0, 1].map((j) => xs.reduce((a, r) => a + r[j]!, 0) / n);
-  const sd = [0, 1].map((j) => {
+  const d = xs[0]!.length;
+  const featMean = xs[0]!.map((_, j) => xs.reduce((a, r) => a + r[j]!, 0) / n);
+  const sd = xs[0]!.map((_, j) => {
     const v = xs.reduce((a, r) => a + (r[j]! - featMean[j]!) * (r[j]! - featMean[j]!), 0) / n;
     return Math.sqrt(v) || 1;
   });
-  const z = xs.map((r) => [(r[0]! - featMean[0]!) / sd[0]!, (r[1]! - featMean[1]!) / sd[1]!]);
+  const z = xs.map((r) => r.map((v, j) => (v - featMean[j]!) / sd[j]!));
   const base = mean(ys);
   let intercept = Math.log(base / (1 - base));
-  let weights = [0, 0];
+  let weights = new Array<number>(d).fill(0);
   for (let it = 0; it < model.odds_logistic_iterations; it++) {
-    let gw0 = 0;
-    let gw1 = 0;
+    const gw = new Array<number>(d).fill(0);
     let gb = 0;
     for (let i = 0; i < n; i++) {
-      const pr = sigmoid(intercept + weights[0]! * z[i]![0]! + weights[1]! * z[i]![1]!);
-      const d = pr - ys[i]!;
-      gw0 += (d * z[i]![0]!) / n;
-      gw1 += (d * z[i]![1]!) / n;
-      gb += d / n;
+      let s = intercept;
+      for (let j = 0; j < d; j++) s += weights[j]! * z[i]![j]!;
+      const pr = sigmoid(s);
+      const dd = pr - ys[i]!;
+      for (let j = 0; j < d; j++) gw[j]! += (dd * z[i]![j]!) / n;
+      gb += dd / n;
     }
-    weights = [
-      weights[0]! - model.odds_logistic_lr * (gw0 + (model.odds_logistic_lambda * weights[0]!) / n),
-      weights[1]! - model.odds_logistic_lr * (gw1 + (model.odds_logistic_lambda * weights[1]!) / n),
-    ];
+    weights = weights.map((w, j) => w - model.odds_logistic_lr * (gw[j]! + (model.odds_logistic_lambda * w) / n));
     intercept -= model.odds_logistic_lr * gb;
   }
-  return { intercept: round4(intercept), weights: weights.map(round4), mean: featMean.map(round4), sd: sd.map(round4) };
+  const catObj: Record<string, number> = {};
+  for (const [k, v] of [...catRate.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) catObj[k] = round4(v);
+  return { intercept: round4(intercept), weights: weights.map(round4), mean: featMean.map(round4), sd: sd.map(round4), catRate: catObj, overall: round4(overall) };
 }
 
 function logisticProb(
   p: SnapshotProtocol,
   asOf: string,
-  fit: { intercept: number; weights: number[]; mean: number[]; sd: number[] },
+  fit: { intercept: number; weights: number[]; mean: number[]; sd: number[]; catRate: Record<string, number>; overall: number },
   model: ModelConstants,
 ): number {
-  const f = logisticFeatures(p, asOf, model);
-  const z0 = (f[0]! - fit.mean[0]!) / fit.sd[0]!;
-  const z1 = (f[1]! - fit.mean[1]!) / fit.sd[1]!;
-  return sigmoid(fit.intercept + fit.weights[0]! * z0 + fit.weights[1]! * z1);
+  const catRate = new Map(Object.entries(fit.catRate));
+  const f = logisticFeatures(p, asOf, model, catRate, fit.overall);
+  let s = fit.intercept;
+  for (let j = 0; j < fit.weights.length; j++) s += fit.weights[j]! * ((f[j]! - fit.mean[j]!) / fit.sd[j]!);
+  return sigmoid(s);
 }
 
 function logLoss(pred: number[], labels: number[]): number {
@@ -719,12 +779,14 @@ export function fitLaunchOdds(snapshot: Snapshot, model: ModelConstants = MODEL)
     age_odds: ageOdds,
     tvl_buckets: tvlBuckets,
     growth_buckets: growthBuckets,
+    logistic_features: LOGISTIC_FEATURES,
     logistic_intercept: logFit.intercept,
     logistic_weights: logFit.weights,
     logistic_mean: logFit.mean,
     logistic_sd: logFit.sd,
     logistic_age_weight: logFit.weights[1]!,
     logistic_tvl_weight: logFit.weights[0]!,
+    category_pre_token_rate: logFit.catRate,
     age_bucket_logistic_median: ageMedian,
     logistic_cv_logloss: logLoss(logPred, labels),
     logistic_cv_auc: aucScore(logPred, labels),
@@ -738,18 +800,21 @@ export function oddsFor(
   asOf: string,
   odds: OddsFit,
   model: ModelConstants = MODEL,
-): { odds: number; logisticOdds: number; ageMedian: number } {
+): { odds: number; logisticOdds: number; ageMedian: number; catRate: number } {
   const logFit = {
     intercept: odds.logistic_intercept,
     weights: odds.logistic_weights,
     mean: odds.logistic_mean,
     sd: odds.logistic_sd,
+    catRate: odds.category_pre_token_rate,
+    overall: odds.overall_pre_token_share,
   };
   const lp = logisticProb(p, asOf, logFit, model);
   const ab = ageBucket(ageDays(asOf, p.listed_at));
   const ageMedian = ab < 0 ? odds.overall_pre_token_share : odds.age_bucket_logistic_median[ab]!;
+  const catRate = odds.category_pre_token_rate[p.category ?? 'Uncategorised'] ?? odds.overall_pre_token_share;
   const o = clamp(lp, model.odds_floor, model.odds_cap);
-  return { odds: round4(o), logisticOdds: round4(lp), ageMedian: round4(ageMedian) };
+  return { odds: round4(o), logisticOdds: round4(lp), ageMedian: round4(ageMedian), catRate: round4(catRate) };
 }
 
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
@@ -992,6 +1057,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
         launch_odds: s.odds.odds,
         odds_logistic: s.odds.logisticOdds,
         odds_age_median: s.odds.ageMedian,
+        odds_cat_rate: s.odds.catRate,
         age_days: s.age,
       },
       farm,
@@ -1020,6 +1086,7 @@ function radarRow(row: BoardRow): RadarRow {
     growth_multiplier: row.model.growth_multiplier,
     odds_logistic: row.model.odds_logistic,
     odds_age_median: row.model.odds_age_median,
+    odds_cat_rate: row.model.odds_cat_rate,
     farm: row.farm,
     farm_steps: row.farm_steps,
   };
