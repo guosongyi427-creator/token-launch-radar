@@ -1,4 +1,4 @@
-// token-radar-01 entry, model radar-5 (Node 22, standard library only).
+// token-radar-01 entry, model radar-6 (Node 22, standard library only).
 //
 // Reads the sealed snapshot, fits the size curve and launch odds on that
 // snapshot with lib/model.ts, writes board.json and data.js, copies
